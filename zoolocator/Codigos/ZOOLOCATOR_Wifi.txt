@@ -1,0 +1,175 @@
+#include <TinyGPS++.h>
+#include <heltec.h>
+#include "DHT.h"
+#include <NewPing.h>
+
+// Definir pines y configuraciones
+const int GPS_RX_PIN = 21;
+const int GPS_TX_PIN = 22;
+const int DHTPIN = 13;
+const int TRIGGER_PIN = 12;
+const int ECHO_PIN = 14;
+const int MAX_DISTANCE = 200;
+#define DHTTYPE DHT11
+
+HardwareSerial SerialGPS(1);
+TinyGPSPlus gps;
+DHT dht(DHTPIN, DHTTYPE);
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
+
+float temperatura = 0.0;
+float humedad = 0.0;
+float sensorEstado = 0.0;
+
+#define BAND 915E6
+byte spread_factor = 8;
+
+byte dir_local = 0xD5;
+byte dir_destino = 0xC1;
+byte id_msjLoRa = 0;
+String paqueteEnv = "";
+
+long tiempo_antes = 0;
+long tiempo_intervalo = 30000;
+long tiempo_espera = tiempo_intervalo + random(3000);
+
+float prev_latitude = 20.2311;  // Latitud predefinida
+float prev_longitude = -99.2131;  // Longitud predefinida
+
+float tempSensor = 0.0;
+float humSensor = 0.0;
+float distanceSensor = 0.0;
+String gpsLatitude = "";
+String gpsLongitude = "";
+int rssi_lora = 0;
+
+void setup() {
+  Heltec.begin(true, true, true, true, BAND);
+  LoRa.setSpreadingFactor(spread_factor);
+
+  Serial.begin(9600);
+  SerialGPS.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  dht.begin();
+  LoRa.receive();
+}
+
+void loop() {
+  float latitude = 0.0;
+  float longitude = 0.0;
+  float speed = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  // Leer datos del GPS
+  while (SerialGPS.available() > 0) {
+    if (gps.encode(SerialGPS.read())) {
+      if (gps.location.isUpdated()) {
+        latitude = gps.location.lat();
+        longitude = gps.location.lng();
+        speed = gps.speed.kmph();
+        hour = gps.time.hour();
+        minute = gps.time.minute();
+        second = gps.time.second();
+      }
+    }
+  }
+
+  // Leer datos del sensor DHT11
+  sensorLeeDHT();
+
+  // Leer datos del sensor ultrasónico
+  obtenerUltrasonico();
+
+  // Construir objeto JSON con datos del GPS, temperatura, humedad y sensor ultrasónico
+  paqueteEnv = "{\"Latitud\":" + String(prev_latitude, 6) +
+               ",\"Longitud\":" + String(prev_longitude, 6) +
+               ",\"Temperatura\":" + String(temperatura, 2) +
+               ",\"Humedad\":" + String(humedad, 2) +
+               ",\"Distancia\":" + String(sensorEstado, 2) + "}";
+
+  // Enviar por LoRa
+  envia_lora(dir_destino, dir_local, id_msjLoRa, paqueteEnv);
+  id_msjLoRa++;
+
+  // Mostrar datos en el monitor serial
+  if (Serial) {
+    Serial.println(paqueteEnv);
+  }
+
+  // Actualizar variables para mostrar en la pantalla
+  tempSensor = temperatura;
+  humSensor = humedad;
+  distanceSensor = sensorEstado;
+  gpsLatitude = String(latitude, 6);
+  gpsLongitude = String(longitude, 6);
+  rssi_lora = LoRa.packetRssi();
+
+  // Mostrar datos en la pantalla
+  pantalla_Mostrar();
+
+  // Actualizar tiempos para próxima transmisión
+  tiempo_antes = millis();
+  tiempo_espera = tiempo_intervalo + random(3000);
+
+  if (LoRa.parsePacket()) {
+    // Procesar mensajes LoRa recibidos si es necesario
+  }
+}
+
+void envia_lora(byte destino, byte remite, byte id, String mensaje) {
+  LoRa.beginPacket();
+  LoRa.write(destino);
+  LoRa.write(remite);
+  LoRa.write(id);
+  LoRa.write(mensaje.length());
+  LoRa.print(mensaje);
+  LoRa.endPacket();
+}
+
+void sensorLeeDHT() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  
+  if (isnan(temp) || isnan(hum)) {
+    temperatura = 0.0;
+    humedad = 0.0;
+  } else {
+    temperatura = temp;
+    humedad = hum;
+  }
+}
+
+void obtenerUltrasonico() {
+  int distancia = sonar.ping_cm();
+  int umbral_cerca = 20;
+  int umbral_cercano_medio = 40;
+  int umbral_medio = 60;
+  int umbral_medio_alejado = 80;
+
+  if (distancia < umbral_cerca) {
+    sensorEstado = 20.0;
+  } else if (distancia < umbral_cercano_medio) {
+    sensorEstado = 40.0;
+  } else if (distancia < umbral_medio) {
+    sensorEstado = 60.0;
+  } else if (distancia < umbral_medio_alejado) {
+    sensorEstado = 80.0;
+  } else {
+    sensorEstado = 100.0;
+  }
+}
+
+void pantalla_Mostrar() {
+  Heltec.display->clear();
+  Heltec.display->setTextAlignment(TEXT_ALIGN_LEFT);
+  
+  Heltec.display->drawString(0, 0, "Num de packs enviados: " + String(id_msjLoRa));
+  Heltec.display->drawString(0, 10, "Temp: " + String(tempSensor, 2) + " °C");
+  Heltec.display->drawString(0, 20, "Hum: " + String(humSensor, 2) + " %");
+  Heltec.display->drawString(0, 30, "Dist: " + String(distanceSensor, 2) + " cm");
+  Heltec.display->drawString(0, 40, "Lat: " + gpsLatitude);
+  Heltec.display->drawString(0, 50, "Lng: " + gpsLongitude);
+  Heltec.display->drawString(0, 60, "RSSI: " + String(rssi_lora) + " dBm");
+  Heltec.display->display();
+}

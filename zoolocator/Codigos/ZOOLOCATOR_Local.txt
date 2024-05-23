@@ -1,0 +1,224 @@
+// Librerías necesarias
+#include <TinyGPS++.h>
+#include <heltec.h>
+#include "DHT.h"
+#include "images.h"
+#include <NewPing.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// Configuración de los pines
+const int GPS_RX_PIN = 21;
+const int GPS_TX_PIN = 20;
+const int DHTPIN = 22;
+#define DHTTYPE DHT11
+#define TRIGGER_PIN  18
+#define ECHO_PIN     5
+
+HardwareSerial SerialGPS(1);
+TinyGPSPlus gps;
+DHT dht(DHTPIN, DHTTYPE);
+NewPing sonar(TRIGGER_PIN, ECHO_PIN);
+
+// LoRa Configuración
+#define BAND  915E6
+byte spread_factor = 8;
+byte dir_local   = 0xD5; 
+byte dir_destino = 0xC1; 
+byte id_msjLoRa  = 0;
+int rssi_lora = 0; // Declaración de la variable global rssi_lora
+
+// MQTT Configuración
+const char* ssid = "BRONZY_LAP";
+const char* password = "Bronzy_RED";
+const char* mqtt_server = "broker.hivemq.com";
+const char* mqtt_topic = "sensores";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Control de tiempo entre lecturas del sensor DHT11
+unsigned long tiempo_antes = 0;
+const unsigned long tiempo_intervalo = 6000;
+unsigned long tiempo_espera = tiempo_intervalo + random(3000);
+
+// Control de envío de datos de sensores
+bool enviarGPS = true;
+bool enviarDHT = false;
+bool enviarUltrasonico = false;
+
+String temperatura = "";
+String humedad = "";
+String sensorEstado = "";
+
+// Latitud y longitud predefinidas
+float latitud = 20.205045;
+float longitud = -99.222225;
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi conectado");
+  Serial.println("Dirección IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Mensaje recibido [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Intentando conexión MQTT...");
+    if (client.connect("arduinoClient")) {
+      Serial.println("Conectado");
+      client.subscribe(mqtt_topic);
+    } else {
+      Serial.print("Falló, rc=");
+      Serial.print(client.state());
+      Serial.println(" Intentando de nuevo en 5 segundos");
+      delay(5000);
+    }
+  }
+}
+
+void pantalla_Mostrar() {
+  Heltec.display->clear();
+  Heltec.display->setTextAlignment(TEXT_ALIGN_LEFT);
+  
+  // Mostrar datos de LoRa
+  Heltec.display->drawString(0, 0, "Num de packs enviados: " + String(id_msjLoRa));
+
+  // Mostrar datos del sensor DHT11
+  Heltec.display->drawString(0, 10, "Temp: " + temperatura + " °C");
+  Heltec.display->drawString(0, 20, "Hum: " + humedad + " %");
+
+  // Mostrar datos del sensor ultrasónico
+  Heltec.display->drawString(0, 30, "Dist: " + sensorEstado + " cm");
+
+  // Mostrar datos del GPS
+  Heltec.display->drawString(0, 40, "Lat: " + String(latitud, 6));
+  Heltec.display->drawString(0, 50, "Lng: " + String(longitud, 6));
+
+  // Mostrar RSSI de LoRa
+  Heltec.display->drawString(0, 60, "RSSI: " + String(rssi_lora) + " dBm");
+  
+  Heltec.display->display();
+}
+
+void setup() {
+  Serial.begin(9600);
+  SerialGPS.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  dht.begin();
+  Heltec.begin(true, true, true, true, BAND);
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
+  // Inicializar el generador de números aleatorios
+  randomSeed(analogRead(0));
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  // Controlar el envío de datos de cada sensor
+  if (enviarGPS) {
+    obtenerGPS();
+    enviarGPS = false;
+    enviarDHT = true; // Siguiente sensor a enviar
+  } else if (enviarDHT) {
+    obtenerDHT();
+    enviarDHT = false;
+    enviarUltrasonico = true; // Siguiente sensor a enviar
+  } else if (enviarUltrasonico) {
+    obtenerUltrasonico();
+    enviarUltrasonico = false;
+    enviarMQTT(); // Envía los datos una vez que todos los sensores han sido leídos
+    pantalla_Mostrar(); // Muestra los datos en la pantalla
+    delay(5000); // Tiempo de espera entre envíos de datos
+    // Reiniciar para el próximo ciclo de lectura
+    enviarGPS = true;
+  }
+}
+
+void obtenerGPS() {
+  while (SerialGPS.available() > 0) {
+    if (gps.encode(SerialGPS.read())) {
+      if (gps.location.isUpdated()) {
+        float latitude = gps.location.lat();
+        float longitude = gps.location.lng();
+        float speed = gps.speed.kmph();
+        int hour = gps.time.hour();
+        int minute = gps.time.minute();
+        int second = gps.time.second();
+      }
+    }
+  }
+}
+
+void obtenerDHT() {
+  // Definimos valores fijos para temperatura y humedad
+  humedad = "75";
+  temperatura = "18";
+}
+
+int Distancia = 0;
+void obtenerUltrasonico() {
+  // Generar un valor aleatorio entre 1 y 100 para la distancia
+  int distancia = random(1, 101);
+
+  // Establecer sensorEstado según los umbrales definidos
+  if (distancia < 20) {
+    sensorEstado = "20";
+  } else if (distancia < 40) {
+    sensorEstado = "40";
+  } else if (distancia < 60) {
+    sensorEstado = "60";
+  } else if (distancia < 80) {
+    sensorEstado = "80";
+  } else {
+    sensorEstado = "100";
+  }
+
+  // Almacenar el valor real de la distancia en Distancia
+  Distancia = distancia;
+}
+
+void enviarMQTT() {
+  // Latitud y longitud definidas manualmente
+  float latitud = /*20.20464815158943*//*20.23436719730443*//*20.175638*/20.463948;
+  float longitud = /*-99.22209201445695*/ /*-99.2055013065829*//*-99.241913*/-99.334281;
+
+  // Construir el JSON con los datos de latitud, longitud, temperatura, humedad y distancia
+  String paqueteEnv = "{\"Latitud\":" + String(latitud, 6) +
+                      ",\"Longitud\":" + String(longitud, 6) +
+                      ",\"Temperatura\":" + temperatura +
+                      ",\"Humedad\":" + humedad +
+                      ",\"Distancia\":" + String(Distancia) + "}";
+
+  // Envío del mensaje MQTT
+  if (client.publish(mqtt_topic, paqueteEnv.c_str())) {
+    Serial.println("Mensaje MQTT enviado:");
+    Serial.println(paqueteEnv);
+  } else {
+    Serial.println("¡Fallo al enviar el mensaje MQTT!");
+  }
+}
